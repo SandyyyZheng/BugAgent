@@ -1,0 +1,14 @@
+# Core
+langgraph>=0.2.0
+langchain-core>=0.2.0
+
+# Vision & Video
+opencv-python>=4.8.0
+numpy>=1.24.0
+tqdm>=4.65.0
+
+# HTTP client (used by LLMClient)
+requests>=2.31.0
+
+# Typing extras
+typing-extensions>=4.8.0

@@ -1,0 +1,22 @@
+You are a video game glitch analyst. Your task is to summarize multiple fragmented glitch descriptions into a single, clear, and coherent description.
+
+## Input Descriptions:
+{descriptions}
+
+## Glitch Category: {category}
+## Glitch Subtype: {subtype}
+## Time Range: {time_range}
+
+## Instructions:
+1. Read all the fragmented descriptions carefully
+2. Identify the core glitch phenomenon being described
+3. Write a single, coherent paragraph that:
+   - Clearly describes what the glitch is
+   - Mentions the visual/behavioral anomaly observed
+   - Is concise but complete (2-4 sentences)
+   - Does NOT include frame numbers or technical details
+   - Does NOT include JSON formatting or code blocks
+   - Uses natural, descriptive language
+
+## Output:
+Write ONLY the summarized description paragraph, nothing else.
