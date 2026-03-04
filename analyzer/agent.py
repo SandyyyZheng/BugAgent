@@ -1,12 +1,8 @@
 """
-Analyzer Agent (renamed from plan_adjust)
+Analyzer Agent
 
-Implements the Memory → Planner → Executor → Reflector loop for detailed
-glitch analysis. The Reflector uses an adversarial debate: Advocate argues
-FOR a glitch, Skeptic argues AGAINST, and the Judge arbitrates.
-
-Key addition: accepts `game_context` from the Scanner and stores it in
-Memory so all agents see the game-type/content description as a knowledge base.
+Orchestrates the Memory → Planner → Executor → Reflector investigation loop
+for detailed glitch analysis of windows flagged by the Scanner.
 """
 
 import json
@@ -16,245 +12,13 @@ from typing import Dict, List, Optional
 
 from llm import LLMClient
 from logger import get_logger
-from .memory import (
-    Memory, AdvocateReflection, SkepticReflection, JudgeRuling,
-)
-from .tools import ToolRegistry, VQATool, ObjectTrackingTool, MathCalculationTool, ZoomInTool, SAM3_AVAILABLE
+from .memory import Memory
+from .tools import ToolRegistry, VQATool, ObjectTrackingTool, ZoomInTool, SAM3_AVAILABLE
+from .planner import Planner
+from .reflector import Reflector
 
 _log = get_logger(__name__)
 
-
-# ── Function-calling schemas ───────────────────────────────────────────────────
-
-PLANNER_FUNCTIONS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "use_tool",
-            "description": (
-                "Use a tool to gather evidence about the potential glitch. "
-                "Iteration 1: always use 'vqa' to establish scene context. "
-                "Iteration 2+: choose proactively — "
-                "Physics glitches → prefer 'object_tracking' for quantitative position/velocity proof; "
-                "Visual/texture glitches → prefer 'zoom_in' on the affected region; "
-                "Animation/Game Logic → prefer 'zoom_in' on the character. "
-                "Do NOT default back to 'vqa' on iteration 2 unless the other tools are clearly unsuitable."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "tool": {
-                        "type": "string",
-                        "enum": ["vqa", "zoom_in", "object_tracking"],
-                        "description": (
-                            "'vqa': visual question on the full stitched window image. Use on iteration 1, or when other tools are unsuitable. "
-                            "'zoom_in': crop+magnify a specific region, then VQA. PREFERRED for Visual/Animation glitches on iteration 2+. "
-                            "'object_tracking': frame-by-frame SAM3 tracking + physics analysis. PREFERRED for Physics glitches (floating, clipping, jittering, teleportation) on iteration 2+."
-                        ),
-                    },
-                    "reasoning": {
-                        "type": "string",
-                        "description": "Brief explanation of why this tool will help verify the hypothesis",
-                    },
-                    "question": {
-                        "type": "string",
-                        "description": (
-                            "Visual question to ask. Required for 'vqa' and 'zoom_in'."
-                        ),
-                    },
-                    "frame_index": {
-                        "description": (
-                            "REQUIRED for zoom_in. "
-                            "Single int for one frame (e.g. 12), or list of ints for a "
-                            "multi-frame grid (e.g. [10, 12, 14]). "
-                            "Pick frames where the glitch is most visible."
-                        ),
-                    },
-                    "region": {
-                        "description": (
-                            "REQUIRED for zoom_in. Where to zoom: "
-                            "spatial name (top_left/top_center/top_right/center_left/center/"
-                            "center_right/bottom_left/bottom_center/bottom_right/full) "
-                            "or normalized bbox [x1, y1, x2, y2] in [0, 1]."
-                        ),
-                    },
-                    "object_description": {
-                        "type": "string",
-                        "description": (
-                            "REQUIRED when tool='object_tracking'. "
-                            "Short, visually distinctive description of the object to track "
-                            "(e.g. 'player character', 'red sports car', 'white NPC'). "
-                            "2-5 words max. Describe what it looks like, NOT the glitch itself."
-                        ),
-                    },
-                },
-                "required": ["tool", "reasoning"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "conclude",
-            "description": (
-                "Stop investigation and provide final conclusion. "
-                "Only use after asking at least one VQA question."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "reasoning": {
-                        "type": "string",
-                        "description": "Why we have enough evidence to conclude",
-                    }
-                },
-                "required": ["reasoning"],
-            },
-        },
-    },
-]
-
-ADVOCATE_FUNCTIONS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "advocate",
-            "description": "Argue that this IS a glitch - find supporting evidence",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "supporting_evidence": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Evidence supporting the glitch hypothesis (include appearance details).",
-                    },
-                    "affected_object_appearance": {
-                        "type": "string",
-                        "description": "Brief visual description of the affected object/character.",
-                    },
-                    "argument": {
-                        "type": "string",
-                        "description": "Your argument for why this is a glitch",
-                    },
-                    "violated_rules": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Physics/visual/logic rules being violated",
-                    },
-                    "confidence_for_glitch": {
-                        "type": "number",
-                        "minimum": 0,
-                        "maximum": 1,
-                        "description": "Your confidence that this IS a glitch (0.0-1.0)",
-                    },
-                },
-                "required": ["supporting_evidence", "argument", "violated_rules", "confidence_for_glitch"],
-            },
-        },
-    }
-]
-
-SKEPTIC_FUNCTIONS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "skeptic",
-            "description": "Argue that this is NOT a glitch - find alternative explanations",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "alternative_explanations": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Possible normal explanations for this behavior",
-                    },
-                    "argument": {
-                        "type": "string",
-                        "description": "Your argument for why this is normal game behavior",
-                    },
-                    "missing_context": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Information needed to rule out normal behavior",
-                    },
-                    "confidence_for_normal": {
-                        "type": "number",
-                        "minimum": 0,
-                        "maximum": 1,
-                        "description": "Your confidence that this is normal (0.0-1.0)",
-                    },
-                },
-                "required": ["alternative_explanations", "argument", "missing_context", "confidence_for_normal"],
-            },
-        },
-    }
-]
-
-JUDGE_FUNCTIONS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "judge",
-            "description": "Make a ruling based on Advocate and Skeptic arguments",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "advocate_summary": {"type": "string"},
-                    "skeptic_summary": {"type": "string"},
-                    "ruling": {
-                        "type": "string",
-                        "enum": ["glitch", "normal", "needs_more_evidence"],
-                    },
-                    "reasoning": {"type": "string"},
-                    "category": {
-                        "type": "string",
-                        "enum": ["Visual", "Physics", "Game Logic", "Other"],
-                    },
-                    "category_corrected": {"type": "boolean"},
-                    "correction_reason": {"type": "string"},
-                    "subtype": {"type": "string"},
-                    "final_confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                    "should_continue": {"type": "boolean"},
-                    "next_questions": {"type": "array", "items": {"type": "string"}},
-                    "description": {"type": "string"},
-                    "supporting_evidence": {"type": "array", "items": {"type": "string"}},
-                    "rejected_explanations": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["advocate_summary", "skeptic_summary", "ruling", "reasoning",
-                             "category", "category_corrected", "final_confidence", "should_continue"],
-            },
-        },
-    }
-]
-
-REFLECTOR_FUNCTIONS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "reflect",
-            "description": "Evaluate the tool result and decide next steps",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "observation": {"type": "string"},
-                    "evidence_strength": {"type": "string", "enum": ["strong", "moderate", "weak"]},
-                    "updated_confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                    "should_continue": {"type": "boolean"},
-                    "adjustment_suggestion": {"type": "string"},
-                    "has_glitch": {"type": "boolean"},
-                    "category": {"type": "string", "enum": ["Visual", "Physics", "Game Logic", "Other"]},
-                    "subtype": {"type": "string"},
-                    "description": {"type": "string"},
-                    "supporting_evidence": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["observation", "evidence_strength", "updated_confidence", "should_continue"],
-            },
-        },
-    }
-]
-
-
-# ── Analyzer Agent ─────────────────────────────────────────────────────────────
 
 class GlitchAnalyzer:
     """
@@ -294,10 +58,20 @@ class GlitchAnalyzer:
             timeout=timeout,
         )
 
-        prompt_path = Path(__file__).parent / "prompt.txt"
-        self._load_prompts(prompt_path)
+        # Load prompts and create subagents
+        _dir = Path(__file__).parent
+        self.planner = Planner(
+            client=self.client,
+            prompt=(_dir / "prompt_planner.txt").read_text(),
+        )
+        self.reflector = Reflector(
+            client=self.client,
+            advocate_prompt=(_dir / "prompt_advocate.txt").read_text(),
+            skeptic_prompt=(_dir / "prompt_skeptic.txt").read_text(),
+            judge_prompt=(_dir / "prompt_judge.txt").read_text(),
+        )
 
-        # ── Tool registration ──────────────────────────────────────────────
+        # Tool registration
         self.tool_registry = ToolRegistry()
 
         self.vqa_tool = VQATool(llm_client=self.client)
@@ -319,10 +93,10 @@ class GlitchAnalyzer:
         if frames_dir:
             _log.debug(f"ObjectTrackingTool / ZoomInTool frames_dir: {frames_dir}")
 
-        # ── Per-window state ───────────────────────────────────────────────
+        # Per-window state
         self._current_image_path: Optional[Path] = None
-        self._current_frame_range: Optional[List[int]] = None  # [start, end]
-        self._current_visual_cues: str = ""  # scanner's visual_cues, for tracking fallback
+        self._current_frame_range: Optional[List[int]] = None
+        self._current_visual_cues: str = ""
 
         _log.debug(
             f"GlitchAnalyzer initialized | model={model} | "
@@ -344,7 +118,6 @@ class GlitchAnalyzer:
         self._current_image_path = Path(window_image_path)
         window_id = (window_info or {}).get("window_id", scanner_result.get("window_id", "?"))
 
-        # Derive frame range and visual cues for object_tracking
         time_nodes = scanner_result.get("time_nodes", [])
         if time_nodes and all(isinstance(f, int) for f in time_nodes):
             self._current_frame_range = [min(time_nodes), max(time_nodes)]
@@ -378,8 +151,7 @@ class GlitchAnalyzer:
             _log.info(f"[Window {window_id}] ── Iteration {iteration}/{self.max_iterations} ──")
 
             # ── Step 1: Planner ──
-            t_plan = time.time()
-            plan = self._run_planner(memory, iteration)
+            plan = self.planner.run(memory, iteration, self.tool_registry)
             _log.debug(
                 f"[Window {window_id}] [Planner] raw result: "
                 f"{json.dumps({k: v for k, v in plan.items() if k != 'question'}, ensure_ascii=False)}"
@@ -466,8 +238,8 @@ class GlitchAnalyzer:
             )
 
             # ── Step 3: Reflection ──
-            if use_adversarial and self.advocate_prompt and self.skeptic_prompt and self.judge_prompt:
-                judge_ruling = self._run_adversarial_reflection(memory, tool_result, window_id)
+            if use_adversarial and self.reflector.has_adversarial_mode:
+                judge_ruling = self.reflector.run_debate(memory, tool_result, window_id)
                 if judge_ruling.final_confidence >= self.confidence_threshold:
                     _log.info(
                         f"[Window {window_id}] Confidence threshold "
@@ -476,7 +248,7 @@ class GlitchAnalyzer:
                     final_judge_ruling = judge_ruling
                     break
             else:
-                reflection = self._run_reflector(memory, tool_result)
+                reflection = self.reflector.run_legacy(memory, tool_result)
                 _log.info(
                     f"[Window {window_id}] [Reflector] "
                     f"confidence={reflection.get('updated_confidence', 0):.2f} | "
@@ -537,7 +309,6 @@ class GlitchAnalyzer:
         if game_context:
             _log.info(f"Game context (RAG): {game_context[:100]}{'...' if len(game_context) > 100 else ''}")
 
-        # Set frames_dir on the tracking tool so it can start a SAM3 session
         if frames_dir and Path(frames_dir).exists():
             self.tracking_tool.set_frames_dir(Path(frames_dir))
             self.zoom_tool.set_frames_dir(Path(frames_dir))
@@ -600,104 +371,6 @@ class GlitchAnalyzer:
 
         return results
 
-    # ── Planner ───────────────────────────────────────────────────────────
-
-    def _run_planner(self, memory: Memory, iteration: int) -> Dict:
-        context = memory.get_context_for_planner()
-        tools_desc = self.tool_registry.get_tools_description()
-
-        system_msg = f"{self.planner_prompt}\n\n{tools_desc}"
-        if iteration == 1:
-            system_msg += (
-                "\n\n**IMPORTANT**: This is iteration 1. "
-                "You MUST use 'vqa' to establish scene context. Do NOT use conclude."
-            )
-        elif iteration == 2:
-            category = memory.current_category or "Unknown"
-            if category == "Physics":
-                tool_hint = "'object_tracking' (quantitative position/velocity proof)"
-            elif category in ("Visual", "Animation", "Game Logic"):
-                tool_hint = "'zoom_in' (magnify the affected region for a closer look)"
-            else:
-                tool_hint = "'zoom_in' or 'object_tracking' depending on the glitch type"
-            system_msg += (
-                f"\n\n**IMPORTANT**: This is iteration 2. "
-                f"The glitch category is '{category}'. "
-                f"You MUST use {tool_hint} — do NOT call 'vqa' again unless the other tools are clearly unsuitable."
-            )
-
-        user_msg = (
-            f"## Current Context\n\n{context}\n\n"
-            "Select the most appropriate tool to investigate this potential glitch."
-        )
-
-        _log.debug(f"[Planner] Calling LLM (iteration={iteration})")
-        return self._call_llm_with_functions(system_msg, user_msg, PLANNER_FUNCTIONS)
-
-    # ── Object-description extraction for SAM3 ────────────────────────────
-
-    def _get_last_vqa_answer(self, memory: Memory) -> str:
-        """Return the answer text from the most recent successful VQA/zoom_in call."""
-        for tc in reversed(memory.tool_calls):
-            if tc.tool_name in ("vqa", "zoom_in") and tc.result.get("success"):
-                return tc.result.get("answer", "")
-        return ""
-
-    def _sanitize_object_description(self, raw: str, memory: Memory) -> str:
-        """
-        Return a SAM3-safe object description by asking the LLM to extract one
-        from all available context: Planner hint, last VQA answer, scanner cues.
-        Falls back to a generic label only if the LLM call fails entirely.
-        """
-        vqa_answer = self._get_last_vqa_answer(memory)
-        visual_cues = self._current_visual_cues.strip()
-        category = memory.current_category or "Unknown"
-
-        # Build a context block from whatever is available
-        context_parts = []
-        if vqa_answer:
-            context_parts.append(f"Latest scene observation: {vqa_answer[:400]}")
-        if visual_cues:
-            context_parts.append(f"Initial scan cues: {visual_cues[:150]}")
-        if raw:
-            context_parts.append(f"Planner hint (may be imprecise): {raw[:100]}")
-        context = "\n".join(context_parts) or "No scene description available."
-
-        prompt = (
-            f"{context}\n"
-            f"Suspected glitch category: {category}\n\n"
-            "Task: From the information above, extract a 2-4 word visual description "
-            "of the main object or character involved in the suspected glitch. "
-            "Describe only its appearance — NOT the glitch behavior itself. "
-            "Output ONLY the description, nothing else.\n"
-            "Good examples: 'red sports car'  'player in blue armor'  "
-            "'white NPC on left'  'dark motorcycle'  'wooden crate'"
-        )
-        try:
-            raw_out = self.client.chat(
-                system_msg=(
-                    "You extract concise visual object descriptions (2-4 words) "
-                    "from scene text. Output only the description."
-                ),
-                user_msg=prompt,
-                images=[],
-            )
-            desc = raw_out.strip().split("\n")[0].strip("\"'.,;:")
-            desc = " ".join(desc.split()[:5])
-            _log.info(f"[ObjDesc] LLM extracted: '{desc}'")
-            if desc:
-                return desc
-        except Exception as e:
-            _log.warning(f"[ObjDesc] LLM extraction failed: {e}")
-
-        fallback = (
-            "main character"
-            if any(w in visual_cues.lower() for w in ("character", "player", "npc"))
-            else "main object"
-        )
-        _log.warning(f"[ObjDesc] using generic fallback: '{fallback}'")
-        return fallback
-
     # ── Executor ──────────────────────────────────────────────────────────
 
     def _run_executor(self, plan: Dict, memory: Memory) -> Dict:
@@ -717,7 +390,6 @@ class GlitchAnalyzer:
         elif tool_name == "zoom_in":
             fi = plan.get("frame_index")
             if fi is None:
-                # Default: middle frame of the current window range
                 if self._current_frame_range:
                     fi = (self._current_frame_range[0] + self._current_frame_range[1]) // 2
                 else:
@@ -729,7 +401,9 @@ class GlitchAnalyzer:
 
         elif tool_name == "object_tracking":
             raw_desc = plan.get("object_description", "").strip()
-            obj_desc = self._sanitize_object_description(raw_desc, memory)
+            obj_desc = self.planner.sanitize_object_description(
+                raw_desc, memory, self._current_visual_cues
+            )
             params["object_description"] = obj_desc
             params["frame_range"] = self._current_frame_range
 
@@ -738,161 +412,12 @@ class GlitchAnalyzer:
         except Exception as e:
             return {"error": str(e), "success": False}
 
-    # ── Adversarial Reflection ─────────────────────────────────────────────
-
-    def _run_adversarial_reflection(
-        self, memory: Memory, tool_result: Dict, window_id
-    ) -> JudgeRuling:
-        # Advocate
-        _log.debug(f"[Window {window_id}] [Advocate] Building case for glitch...")
-        t0 = time.time()
-        advocate = self._run_advocate(memory, tool_result)
-        _log.info(
-            f"[Window {window_id}] [Advocate] confidence_for_glitch={advocate.confidence_for_glitch:.2f} | "
-            f"elapsed={time.time()-t0:.1f}s"
-        )
-        _log.debug(f"[Window {window_id}] [Advocate] argument: {advocate.argument}")
-        _log.debug(f"[Window {window_id}] [Advocate] violated_rules: {advocate.violated_rules}")
-        _log.debug(f"[Window {window_id}] [Advocate] evidence: {advocate.supporting_evidence}")
-        if advocate.affected_object_appearance:
-            _log.debug(f"[Window {window_id}] [Advocate] object appearance: {advocate.affected_object_appearance}")
-
-        # Skeptic
-        _log.debug(f"[Window {window_id}] [Skeptic] Building case against glitch...")
-        t0 = time.time()
-        skeptic = self._run_skeptic(memory, tool_result)
-        _log.info(
-            f"[Window {window_id}] [Skeptic] confidence_for_normal={skeptic.confidence_for_normal:.2f} | "
-            f"elapsed={time.time()-t0:.1f}s"
-        )
-        _log.debug(f"[Window {window_id}] [Skeptic] argument: {skeptic.argument}")
-        _log.debug(f"[Window {window_id}] [Skeptic] alternatives: {skeptic.alternative_explanations}")
-        _log.debug(f"[Window {window_id}] [Skeptic] missing_context: {skeptic.missing_context}")
-
-        # Judge
-        _log.debug(f"[Window {window_id}] [Judge] Arbitrating...")
-        t0 = time.time()
-        judge = self._run_judge(memory, tool_result, advocate, skeptic)
-        _log.info(
-            f"[Window {window_id}] [Judge] ruling={judge.ruling} | "
-            f"confidence={judge.final_confidence:.2f} | "
-            f"continue={judge.should_continue} | "
-            f"elapsed={time.time()-t0:.1f}s"
-        )
-        _log.debug(f"[Window {window_id}] [Judge] reasoning: {judge.reasoning}")
-        if judge.category_corrected:
-            _log.info(
-                f"[Window {window_id}] [Judge] Category corrected → {judge.category} "
-                f"(was: {memory.hypothesis.get('category','?')}) | reason: {judge.correction_reason}"
-            )
-        if judge.subtype:
-            _log.debug(f"[Window {window_id}] [Judge] subtype: {judge.subtype}")
-        if judge.next_questions:
-            _log.debug(f"[Window {window_id}] [Judge] suggested next questions: {judge.next_questions}")
-
-        memory.add_debate_round(tool_result, advocate, skeptic, judge)
-        return judge
-
-    def _run_advocate(self, memory: Memory, tool_result: Dict) -> AdvocateReflection:
-        context = memory.get_context_for_advocate(tool_result)
-        result = self._call_llm_with_functions(
-            self.advocate_prompt,
-            f"## Evidence to Analyze\n\n{context}\n\nBuild your case for why this IS a glitch.",
-            ADVOCATE_FUNCTIONS,
-        )
-        return AdvocateReflection(
-            supporting_evidence=result.get("supporting_evidence", []),
-            argument=result.get("argument", ""),
-            violated_rules=result.get("violated_rules", []),
-            confidence_for_glitch=result.get("confidence_for_glitch", 0.5),
-            affected_object_appearance=result.get("affected_object_appearance"),
-        )
-
-    def _run_skeptic(self, memory: Memory, tool_result: Dict) -> SkepticReflection:
-        context = memory.get_context_for_skeptic(tool_result)
-        result = self._call_llm_with_functions(
-            self.skeptic_prompt,
-            f"## Evidence to Analyze\n\n{context}\n\nBuild your case for why this is NORMAL game behavior.",
-            SKEPTIC_FUNCTIONS,
-        )
-        return SkepticReflection(
-            alternative_explanations=result.get("alternative_explanations", []),
-            argument=result.get("argument", ""),
-            missing_context=result.get("missing_context", []),
-            confidence_for_normal=result.get("confidence_for_normal", 0.5),
-        )
-
-    def _run_judge(
-        self,
-        memory: Memory,
-        tool_result: Dict,
-        advocate: AdvocateReflection,
-        skeptic: SkepticReflection,
-    ) -> JudgeRuling:
-        context = memory.get_context_for_judge(tool_result, advocate, skeptic)
-        result = self._call_llm_with_functions(
-            self.judge_prompt,
-            f"## Debate Context\n\n{context}\n\nMake your ruling based on both arguments.",
-            JUDGE_FUNCTIONS,
-        )
-        return JudgeRuling(
-            advocate_summary=result.get("advocate_summary", ""),
-            skeptic_summary=result.get("skeptic_summary", ""),
-            ruling=result.get("ruling", "needs_more_evidence"),
-            reasoning=result.get("reasoning", ""),
-            category=result.get("category", memory.current_category or "Unknown"),
-            category_corrected=result.get("category_corrected", False),
-            correction_reason=result.get("correction_reason"),
-            subtype=result.get("subtype"),
-            final_confidence=result.get("final_confidence", 0.5),
-            should_continue=result.get("should_continue", True),
-            next_questions=result.get("next_questions", []),
-            description=result.get("description"),
-            supporting_evidence=result.get("supporting_evidence"),
-            rejected_explanations=result.get("rejected_explanations"),
-        )
-
-    def _run_reflector(self, memory: Memory, tool_result: Dict) -> Dict:
-        """Legacy single-reflector (used when adversarial prompts are missing)."""
-        context = memory.get_context_for_reflector(tool_result)
-        guidance = ""
-        if not tool_result.get("success", True):
-            guidance = (
-                "\n\n**NOTE**: Tool execution FAILED. "
-                "Set should_continue=true and try a different approach."
-            )
-        return self._call_llm_with_functions(
-            self.reflector_prompt + guidance,
-            f"## Analysis Context\n\n{context}\n\nEvaluate this result and provide your reflection.",
-            REFLECTOR_FUNCTIONS,
-        )
-
-    # ── LLM call ─────────────────────────────────────────────────────────
-
-    def _call_llm_with_functions(
-        self,
-        system_message: str,
-        user_message: str,
-        functions: List[Dict],
-    ) -> Dict:
-        try:
-            result = self.client.chat_with_functions(
-                system_msg=system_message,
-                user_msg=user_message,
-                functions=functions,
-            )
-            _log.debug(f"[LLM] function call result: {json.dumps(result, ensure_ascii=False)[:300]}")
-            return result
-        except Exception as e:
-            _log.error(f"[LLM] API call failed: {e}", exc_info=True)
-            return {"error": str(e), "tool": "conclude"}
-
     # ── Final output assembly ─────────────────────────────────────────────
 
     def _generate_final_output(
         self,
         memory: Memory,
-        final_judge_ruling: Optional[JudgeRuling],
+        final_judge_ruling,
         iterations: int,
     ) -> Dict:
         hypothesis = memory.hypothesis or {}
@@ -924,7 +449,6 @@ class GlitchAnalyzer:
                 "iterations": iterations,
             }
         elif last_reflection:
-            # Prefer the Reflector's explicit verdict; fall back to Scanner's hypothesis.
             has_glitch = (
                 last_reflection.has_glitch
                 if last_reflection.has_glitch is not None
@@ -965,50 +489,7 @@ class GlitchAnalyzer:
         output["memory"] = memory.to_dict()
         return output
 
-    # ── Prompt loading ────────────────────────────────────────────────────
-
-    def _load_prompts(self, prompt_path: Path) -> None:
-        with open(prompt_path, "r") as f:
-            content = f.read()
-
-        parts = content.split(
-            "################################################################################"
-        )
-
-        self.planner_prompt = ""
-        self.reflector_prompt = ""
-        self.advocate_prompt = ""
-        self.skeptic_prompt = ""
-        self.judge_prompt = ""
-
-        # Each section is bracketed by two delimiter lines:
-        #   ###...
-        #   # SECTION TITLE
-        #   ###...
-        #   [actual prompt content]
-        # After splitting by the delimiter, title and content are in consecutive parts.
-        # We look for the title in parts[i] and read the content from parts[i+1].
-        for i, part in enumerate(parts):
-            stripped = part.strip()
-            if stripped == "# PLANNER PROMPT" and i + 1 < len(parts):
-                self.planner_prompt = parts[i + 1].strip()
-            elif stripped == "# ADVOCATE REFLECTOR PROMPT" and i + 1 < len(parts):
-                self.advocate_prompt = parts[i + 1].strip()
-            elif stripped == "# SKEPTIC REFLECTOR PROMPT" and i + 1 < len(parts):
-                self.skeptic_prompt = parts[i + 1].strip()
-            elif stripped == "# JUDGE REFLECTOR PROMPT" and i + 1 < len(parts):
-                self.judge_prompt = parts[i + 1].strip()
-            elif stripped == "# REFLECTOR PROMPT" and i + 1 < len(parts):
-                self.reflector_prompt = parts[i + 1].strip()
-
-        _log.debug(
-            f"Prompts loaded | planner={'✓' if self.planner_prompt else '✗'} | "
-            f"advocate={'✓' if self.advocate_prompt else '✗'} | "
-            f"skeptic={'✓' if self.skeptic_prompt else '✗'} | "
-            f"judge={'✓' if self.judge_prompt else '✗'}"
-        )
-
-    # ── IO ─────────────────────────────────────────────────────────────────
+    # ── IO ────────────────────────────────────────────────────────────────
 
     def _save_results(self, results: List[Dict], output_file: Path) -> None:
         output_file = Path(output_file)

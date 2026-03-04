@@ -1,0 +1,13 @@
+Detect whether the following anomaly (or a similar one) is visible in the provided video segment image.
+
+Definition of similar anomalies:
+1. Similar entities (objects, characters, creatures) - might be slightly different due to observation variance.
+2. Similar abnormal type (physical, visual, animation anomalies, etc.).
+
+The anomaly to search for:
+$anomaly_description
+
+Carefully examine the provided image and determine if this anomaly is present.
+
+Respond with JSON:
+{"reasoning": "step by step analysis of what you see in the image", "judgement": "yes or no"}

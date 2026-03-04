@@ -1,0 +1,15 @@
+Determine whether the given anomaly description is similar to the existing anomalies in the cluster.
+
+Criteria for similarity:
+1. Similar entities (objects, characters, creatures). The entity might be slightly different due to observation variance, use reasoning to determine.
+2. Similar abnormal type (physical anomalies, visual anomalies, animation anomalies, etc.).
+3. Similar abnormal behaviors (float/flying, hovering/floating, clipping/collision, etc.).
+
+The given anomaly description is:
+$anomaly_description
+
+The existing anomalies (in time order):
+$existing_descriptions
+
+Respond with JSON:
+{"reasoning": "step by step analysis of similarity", "judgement": "yes or no"}

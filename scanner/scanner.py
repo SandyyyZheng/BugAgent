@@ -6,7 +6,6 @@ images and produces per-window scan results including a game_context field.
 """
 
 import json
-import logging
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Union
@@ -49,9 +48,7 @@ class GlitchScanner:
             timeout=timeout,
         )
 
-        prompt_path = Path(__file__).parent / "prompt.txt"
-        with open(prompt_path, "r") as f:
-            self.system_prompt = f.read()
+        self.system_prompt = (Path(__file__).parent / "system_prompt.txt").read_text()
 
         _log.debug(f"GlitchScanner initialized | model={model} | api_base={api_base}")
 

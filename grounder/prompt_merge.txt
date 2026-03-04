@@ -1,0 +1,8 @@
+Merge the following anomaly descriptions into a single coherent description.
+These descriptions are in chronological order, all describing ONE continuous anomaly.
+Output the merged description only, without any additional text.
+
+Descriptions:
+$descriptions
+
+Merged description:

@@ -11,13 +11,13 @@ Approach:
 3. Merge windows and descriptions for each glitch cluster
 """
 
-import base64
 import json
 import requests
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from string import Template
 from typing import Dict, List, Optional
-import time
 
 from llm import LLMClient
 from logger import get_logger
@@ -116,9 +116,11 @@ class TemporalGrounder:
         )
 
         # Load prompts
-        prompt_path = Path(__file__).parent / "prompt.txt"
-        with open(prompt_path, "r") as f:
-            self.base_prompt = f.read()
+        _dir = Path(__file__).parent
+        self.base_prompt = (_dir / "system_prompt.txt").read_text()
+        self.prompt_similarity = Template((_dir / "prompt_similarity.txt").read_text())
+        self.prompt_visual = Template((_dir / "prompt_visual.txt").read_text())
+        self.prompt_merge = Template((_dir / "prompt_merge.txt").read_text())
 
     def ground(
         self,
@@ -127,7 +129,7 @@ class TemporalGrounder:
         total_windows: Optional[int] = None
     ) -> List[GlitchRecord]:
         """
-        Perform temporal grounding on Plan-Adjust results.
+        Perform temporal grounding on Analyzer results.
 
         Args:
             plan_adjust_results: List of results from Plan-Adjust detection.
@@ -298,23 +300,10 @@ class TemporalGrounder:
         """
         Judge if an anomaly is similar to existing anomalies in a cluster.
         """
-        prompt = f"""You are an expert in video glitch analysis.
-Your task is to determine whether the given anomaly description is similar to the existing anomalies.
-
-Criteria for similarity:
-1. Similar entities (objects, characters, creatures). The entity might be slightly different due to observation variance, use reasoning to determine.
-2. Similar abnormal type (physical anomalies, visual anomalies, animation anomalies, etc.).
-3. Similar abnormal behaviors (float/flying, hovering/floating, clipping/collision, etc.).
-
-The given anomaly description is:
-{anomaly_description}
-
-The existing anomalies (in time order):
-{json.dumps(existing_descriptions, indent=2)}
-
-Respond with JSON:
-{{"reasoning": "step by step analysis of similarity", "judgement": "yes or no"}}"""
-
+        prompt = self.prompt_similarity.substitute(
+            anomaly_description=anomaly_description,
+            existing_descriptions=json.dumps(existing_descriptions, indent=2),
+        )
         try:
             response = self._call_llm(prompt)
             result = self._parse_json(response)
@@ -405,21 +394,7 @@ Respond with JSON:
         Returns:
             True if similar anomaly found, False otherwise.
         """
-        prompt = f"""You are an expert in video game glitch analysis.
-Your task is to detect if there is a similar anomaly in the provided video segment image.
-
-Definition of similar anomalies:
-1. Similar entities (objects, characters, creatures) - might be slightly different due to observation variance.
-2. Similar abnormal type (physical, visual, animation anomalies, etc.).
-
-The anomaly to search for:
-{anomaly_description}
-
-Please carefully examine the provided image and determine if this anomaly (or a similar one) is present.
-
-Respond with JSON:
-{{"reasoning": "step by step analysis of what you see in the image", "judgement": "yes or no"}}"""
-
+        prompt = self.prompt_visual.substitute(anomaly_description=anomaly_description)
         try:
             response = self._call_llm_with_image(prompt, image_data)
             result = self._parse_json(response)
@@ -531,27 +506,13 @@ Respond with JSON:
         """
         Merge multiple descriptions into one coherent description.
         """
-        prompt = f"""You are an expert in video glitch analysis.
-Your task is to merge the descriptions of the given anomalies into a single description.
-The given descriptions in a list are in time order of the development of ONE SINGLE anomaly.
-Please output the merged description only, do not add other words.
-
-The descriptions in a list:
-{json.dumps(descriptions, indent=2)}
-
-The merged description:"""
-
+        prompt = self.prompt_merge.substitute(descriptions=json.dumps(descriptions, indent=2))
         try:
             merged = self._call_llm(prompt)
             return merged.strip()
         except Exception as e:
             _log.warning(f"Description merge failed: {e}")
             return " | ".join(descriptions)
-
-    def _load_image_as_base64(self, image_path: str) -> str:
-        """Load an image file and convert to base64."""
-        with open(image_path, "rb") as f:
-            return base64.b64encode(f.read()).decode("utf-8")
 
     def _call_llm(self, user_message: str) -> str:
         """Call LLM API (text only)."""

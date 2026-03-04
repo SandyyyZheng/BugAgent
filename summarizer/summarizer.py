@@ -8,22 +8,14 @@ into clean, coherent glitch descriptions.
 
 import json
 import re
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
-
-import requests
 
 from llm import LLMClient
 from logger import get_logger
 
 _log = get_logger(__name__)
-
-
-# Load prompt template from file
-PROMPT_FILE = Path(__file__).parent / "prompt.txt"
-SUMMARIZE_PROMPT = PROMPT_FILE.read_text() if PROMPT_FILE.exists() else ""
 
 
 @dataclass
@@ -68,35 +60,10 @@ class Summarizer:
         timeout: int = 60,
         max_retries: int = 3,
         fps: float = 4.0,
-        verbose: bool = True,
         llm_client: Optional[LLMClient] = None,
     ):
-        """
-        Initialize the Summarizer.
-
-        Args:
-            api_key: API key for the LLM service.
-            api_base: Base URL for the API.
-            model: Model name to use.
-            temperature: Sampling temperature.
-            max_tokens: Maximum tokens in response.
-            timeout: Request timeout in seconds.
-            max_retries: Maximum number of retries on failure.
-            fps: Frames per second used during preprocessing (time-based sampling).
-            verbose: Whether to print progress information.
-            llm_client: Optional pre-configured LLMClient instance.
-        """
-        self.api_key = api_key
-        self.api_base = api_base.rstrip("/")
-        self.model = model
-        self.temperature = temperature
-        self.max_tokens = max_tokens
-        self.timeout = timeout
-        self.max_retries = max_retries
         self.fps = fps
-        self.verbose = verbose
-
-        # Use provided client or create one from individual params
+        self.system_prompt = (Path(__file__).parent / "system_prompt.txt").read_text()
         self.client = llm_client or LLMClient(
             api_key=api_key,
             api_base=api_base,
@@ -108,27 +75,10 @@ class Summarizer:
         )
 
     def _call_llm(self, prompt: str) -> str:
-        """
-        Call LLM API with text prompt.
-
-        Args:
-            prompt: Text prompt.
-
-        Returns:
-            LLM response text.
-        """
         return self.client.chat(system_msg="", user_msg=prompt)
 
     def _clean_description(self, description: str) -> str:
-        """
-        Clean up a description by removing JSON formatting and code blocks.
-
-        Args:
-            description: Raw description text.
-
-        Returns:
-            Cleaned description text.
-        """
+        """Clean up a description by removing JSON formatting and code blocks."""
         # Remove markdown code blocks
         description = re.sub(r'```json\s*', '', description)
         description = re.sub(r'```\s*', '', description)
@@ -144,9 +94,7 @@ class Summarizer:
         except json.JSONDecodeError:
             pass
 
-        # Clean up whitespace
-        description = description.strip()
-        return description
+        return description.strip()
 
     def _summarize_description(
         self,
@@ -156,19 +104,7 @@ class Summarizer:
         subtype: str,
         time_nodes: List[List[float]]
     ) -> str:
-        """
-        Use MLLM to summarize fragmented descriptions into a clean description.
-
-        Args:
-            original_descriptions: List of original fragment descriptions.
-            merged_description: The merged description from grounder.
-            category: Glitch category.
-            subtype: Glitch subtype.
-            time_nodes: List of [start_sec, end_sec] time ranges.
-
-        Returns:
-            Summarized clean description.
-        """
+        """Use MLLM to summarize fragmented descriptions into a clean description."""
         # If only one description and it's clean, just clean and return it
         if len(original_descriptions) == 1:
             cleaned = self._clean_description(original_descriptions[0])
@@ -196,7 +132,7 @@ class Summarizer:
             f"{t[0]:.1f}s - {t[1]:.1f}s" for t in time_nodes
         ])
 
-        prompt = SUMMARIZE_PROMPT.format(
+        prompt = self.system_prompt.format(
             descriptions=descriptions_text,
             category=category,
             subtype=subtype,
@@ -205,12 +141,9 @@ class Summarizer:
 
         try:
             summarized = self._call_llm(prompt)
-            # Clean any remaining formatting
-            summarized = self._clean_description(summarized)
-            return summarized
+            return self._clean_description(summarized)
         except Exception as e:
             _log.warning(f"Failed to summarize description: {e}")
-            # Fallback to cleaned merged description
             return self._clean_description(merged_description)
 
     def summarize(
@@ -262,12 +195,10 @@ class Summarizer:
             for occ in occurrences:
                 start_frame = occ.get("start_frame", 0)
                 end_frame = occ.get("end_frame", 0)
-
-                # Convert frames to seconds
-                start_sec = self._frame_to_seconds(start_frame)
-                end_sec = self._frame_to_seconds(end_frame)
-
-                bug_time_nodes.append([start_sec, end_sec])
+                bug_time_nodes.append([
+                    self._frame_to_seconds(start_frame),
+                    self._frame_to_seconds(end_frame),
+                ])
 
             time_nodes.append(bug_time_nodes)
 
@@ -277,7 +208,6 @@ class Summarizer:
             category = glitch.get("category", "Unknown")
             subtype = glitch.get("subtype", "Unknown")
 
-            # If no original descriptions, use the merged one
             if not original_descriptions:
                 original_descriptions = [merged_description]
 
@@ -309,21 +239,7 @@ class Summarizer:
         return report
 
     def _frame_to_seconds(self, frame: int) -> int:
-        """
-        Convert frame number to seconds.
-
-        With time-based sampling at fps=4:
-        - frame 0 is at t=0.00s → second 0
-        - frame 1 is at t=0.25s → second 0
-        - frame 4 is at t=1.00s → second 1
-        - frame N is at t=N/fps → second N//fps
-
-        Args:
-            frame: Frame number (extracted frame index).
-
-        Returns:
-            Time in seconds (integer).
-        """
+        """Convert frame number to seconds (integer) at self.fps."""
         return int(frame // self.fps)
 
     def summarize_and_save(
@@ -354,7 +270,6 @@ class Summarizer:
             video_id=video_id
         )
 
-        # Save to file
         output_file = Path(output_file)
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -366,14 +281,6 @@ class Summarizer:
 
     @staticmethod
     def load_grounded_results(file_path: Path) -> Dict:
-        """
-        Load grounded results from file.
-
-        Args:
-            file_path: Path to grounded results JSON file.
-
-        Returns:
-            Dict containing grounded results.
-        """
+        """Load grounded results from file."""
         with open(file_path, "r") as f:
             return json.load(f)

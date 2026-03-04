@@ -294,7 +294,6 @@ def summarizer_node(state: BugAgentState) -> Dict[str, Any]:
     """Generate the final report from grounded glitch records."""
     cfg = state["config"]
     sm_cfg = cfg["summarizer"]
-    verbose = cfg.get("verbose", True)
 
     _log.info("━━━ Stage 5: Summarizer ━━━")
     t0 = time.time()
@@ -310,7 +309,6 @@ def summarizer_node(state: BugAgentState) -> Dict[str, Any]:
             max_retries=cfg["llm"]["max_retries"],
         ),
         fps=sm_cfg["fps"],
-        verbose=verbose,
     )
 
     # When scanner found no glitches (skipped analyzer+grounder), grounded_results

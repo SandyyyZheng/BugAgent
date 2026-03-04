@@ -1,4 +1,4 @@
-# BugAgent
+# BugAgent - Glitch Detection in Gameplay Videos
 
 A LangGraph-based multimodal LLM pipeline for automated video game glitch detection.
 
@@ -6,59 +6,13 @@ A LangGraph-based multimodal LLM pipeline for automated video game glitch detect
 
 ## Architecture
 
-```
-Video
-  │
-  ▼
-┌─────────────┐
-│  Preprocess │  Extract frames · Segment into stitched windows
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│   Scanner   │  Initial screening of every window
-│             │  → has_glitch · category · confidence
-│             │  → game_context  ◀ NEW: RAG knowledge base
-└──────┬──────┘
-       │ has glitch?
-       ├──── NO ──────────────────────────────────────────┐
-       │                                                   │
-       ▼                                                   │
-┌─────────────────────────────────────────────────────┐   │
-│  Analyzer  (Memory · Planner · Executor · Reflector) │   │
-│                                                      │   │
-│  Memory holds game_context from Scanner as a RAG     │   │
-│  knowledge base for all sub-agents.                  │   │
-│                                                      │   │
-│  Reflector = adversarial debate:                     │   │
-│    Advocate  →  argues this IS a glitch              │   │
-│    Skeptic   →  argues this is normal behavior       │   │
-│    Judge     →  makes final ruling                   │   │
-└──────┬──────────────────────────────────────────────┘   │
-       │                                                   │
-       ▼                                                   │
-┌─────────────┐                                            │
-│   Grounder  │  Cluster adjacent glitches · temporal      │
-│             │  boundary detection (bidirectional)         │
-└──────┬──────┘                                            │
-       │                                           ◀───────┘
-       ▼
-┌─────────────┐
-│  Summarizer │  Convert to final report with time-based nodes
-└─────────────┘
-       │
-       ▼
-   JSON Report
-```
+BugAgent processes a video through five sequential stages:
 
-### Key Design Choices
-
-| Component | Original | BugAgent |
-|-----------|----------|----------|
-| `categorizer` | GlitchCategorizer | **GlitchScanner** — adds `game_context` field |
-| `plan_adjust` | PlanAdjustAgent | **GlitchAnalyzer** — reads `game_context` from Memory |
-| Orchestration | Sequential scripts | **LangGraph StateGraph** |
-| Game context | None | Scanner produces it; Analyzer uses it as a RAG knowledge base |
+- **Preprocess** — Extracts frames at a fixed FPS and stitches them into overlapping windows for downstream processing.
+- **Scanner** — Runs a fast initial screening over every window to produce a glitch hypothesis (`has_glitch`, `category`, `confidence`) and a `game_context` description used as a RAG knowledge base by later stages.
+- **Analyzer** — For windows flagged by the Scanner, runs an iterative investigation loop: a **Planner** selects the next tool, an **Executor** runs it, and a **Reflector** evaluates the result via an adversarial debate between an **Advocate** (game test engineer, argues for glitch), a **Skeptic** (game developer, argues for normal behavior), and a **Judge** (tech lead, makes the ruling).
+- **Grounder** — Clusters analysis results across windows, merges adjacent occurrences of the same glitch, and performs bidirectional temporal boundary refinement.
+- **Summarizer** — Converts grounded glitch records into the final report, translating frame indices to timestamps and using an LLM to produce clean, coherent descriptions.
 
 ---
 
@@ -79,29 +33,37 @@ BugAgent/
 │   └── video_preprocessor.py # Frame extraction + window stitching
 │
 ├── scanner/                  # ── Stage 2 ──
-│   ├── scanner.py            # GlitchScanner class
-│   └── prompt.txt            # Scanner system prompt (adds game_context)
+│   ├── scanner.py            # GlitchScanner
+│   └── system_prompt.txt
 │
 ├── analyzer/                 # ── Stage 3 ──
-│   ├── agent.py              # GlitchAnalyzer (Memory-Planner-Executor-Reflector)
-│   ├── memory.py             # Memory with game_context support
-│   ├── tools.py              # VQATool (active) + placeholders
-│   └── prompt.txt            # Planner / Advocate / Skeptic / Judge prompts
+│   ├── agent.py              # GlitchAnalyzer orchestration loop
+│   ├── planner.py            # Planner subagent
+│   ├── reflector.py          # Advocate / Skeptic / Judge subagents
+│   ├── memory.py             # Per-window investigation memory
+│   ├── tools.py              # VQA, ZoomIn, ObjectTracking, MathCalculation
+│   ├── prompt_planner.txt
+│   ├── prompt_advocate.txt
+│   ├── prompt_skeptic.txt
+│   └── prompt_judge.txt
 │
 ├── grounder/                 # ── Stage 4 ──
 │   ├── grounder.py           # TemporalGrounder
-│   └── prompt.txt
+│   ├── system_prompt.txt
+│   ├── prompt_similarity.txt
+│   ├── prompt_visual.txt
+│   └── prompt_merge.txt
 │
 └── summarizer/               # ── Stage 5 ──
     ├── summarizer.py         # Summarizer
-    └── prompt.txt
+    └── system_prompt.txt
 ```
 
 ---
 
-## game_context: RAG Knowledge Base
+## game_context: RAG-like Knowledge Base
 
-The **Scanner** now produces a `game_context` field in every window's output:
+The **Scanner** produces a `game_context` field in every window's output:
 
 ```json
 {
@@ -133,16 +95,13 @@ intentional design without hallucinating game details.
 
 ## Tools
 
-Only **VQA** is active. Placeholder classes exist for future tools:
-
 | Tool | Status | Description |
 |------|--------|-------------|
-| `vqa` | ✅ Active | Visual QA via MLLM — asks questions about stitched window images |
-| `object_tracking` | 🔲 Placeholder | Frame-by-frame tracking via SAM3 |
-| `math_calculation` | 🔲 Placeholder | Physics/trajectory analysis from tracking data |
+| `vqa` | ✅ Active | Visual QA on the full stitched window image via MLLM |
+| `zoom_in` | ✅ Active | Crop and magnify a region of interest, then run VQA |
+| `object_tracking` | ⚡ Optional | Frame-by-frame SAM3 tracking + automatic physics analysis (requires SAM3 installation) |
 
-To activate a placeholder tool, implement its `execute()` method in
-`analyzer/tools.py` and uncomment the registration line in `analyzer/agent.py`.
+`object_tracking` is lazily initialized — SAM3 is only loaded on the first call, and the tool disables itself gracefully if SAM3 is not installed.
 
 ---
 
@@ -160,7 +119,7 @@ pip install -r requirements.txt
 # Start vLLM first:
 # vllm serve Qwen/Qwen2.5-VL-7B-Instruct --port 8000
 
-python run.py --video data/videos/30p1kv.mp4
+python run.py --video data/videos/video_name.mp4
 ```
 
 ### 3. Run with OpenAI
@@ -172,27 +131,6 @@ python run.py \
     --api-base https://api.openai.com/v1 \
     --model gpt-4o \
     --game-name "GTA V"
-```
-
-### 4. Programmatic use
-
-```python
-from config import BugAgentConfig
-from graph import run_pipeline
-
-cfg = BugAgentConfig()
-cfg.llm.api_key = "sk-..."
-cfg.llm.api_base = "https://api.openai.com/v1"
-cfg.llm.model = "gpt-4o"
-
-final_state = run_pipeline(
-    video_path="data/videos/haj831.mp4",
-    config_dict=cfg.to_dict(),
-    game_name="GTA V",
-)
-
-report = final_state["final_report"]
-print(report["bugs"])
 ```
 
 ---
@@ -207,7 +145,7 @@ The final report is saved to `{output_dir}/results/{video_name}_report.json`:
   "game_name": "GTA V",
   "no_bugs": false,
   "bugs": [
-    "A red sports car is floating approximately 2 meters above the road surface near the highway overpass, with no visible support or propulsion."
+    "A red sports car is floating above the road surface near the highway overpass, with no visible support or propulsion."
   ],
   "time_nodes": [
     [[12, 15], [23, 24]]
@@ -256,16 +194,14 @@ cfg.summarizer.fps = 4.0   # must match preprocess.target_fps
 
 ## LangGraph Flow
 
-```
-preprocess_node
-      │
-scanner_node
-      │
-      ├── (has glitches) ──► analyzer_node ──► grounder_node ──► summarizer_node ──► END
-      │
-      └── (no glitches) ──────────────────────────────────────► summarizer_node ──► END
-```
+BugAgent uses [LangGraph](https://github.com/langchain-ai/langgraph)'s `StateGraph` to wire the pipeline together. Each stage is a **node** that reads from and writes to a shared `BugAgentState` TypedDict. State is passed immutably between nodes — each node returns only the keys it updates.
 
-The conditional edge `route_after_scanner` skips the analyzer and grounder entirely
-when the scanner finds no potential glitches, producing a clean "no bugs" report
-without wasting API calls.
+The edge from `scanner_node` is **conditional**: if no glitches were found, the graph skips directly to `summarizer_node`, avoiding unnecessary analyzer and grounder calls.
+
+```
+preprocess_node → scanner_node
+                       │
+                       ├── (has glitches) ──► analyzer_node ──► grounder_node ──► summarizer_node
+                       │
+                       └── (no glitches) ────────────────────────────────────► summarizer_node
+```
