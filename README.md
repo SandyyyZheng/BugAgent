@@ -10,8 +10,8 @@ A LangGraph-based multimodal LLM pipeline for automated video game glitch detect
 
 BugAgent processes a video through five sequential stages:
 
-- **Preprocess** — Extracts frames at a fixed FPS and stitches them into overlapping windows for downstream processing.
-- **Scanner** — Runs a fast initial screening over every window to produce a glitch hypothesis (`has_glitch`, `category`, `confidence`) and a `game_context` description used as a RAG knowledge base by later stages.
+- **Preprocess** — Extracts frames at a fixed FPS (default 4 fps) and stitches them into windows (default 8 frames per window) for downstream processing.
+- **Scanner** — Runs a fast initial screening over every window to produce a glitch hypothesis (`has_glitch`, `category`, `confidence`) and a `game_context` description used as a RAG-like knowledge base by later stages.
 - **Analyzer** — For windows flagged by the Scanner, runs an iterative investigation loop: a **Planner** selects the next tool, an **Executor** runs it, and a **Reflector** evaluates the result via an adversarial debate between an **Advocate** (game test engineer, argues for glitch), a **Skeptic** (game designer, argues for normal behavior), and a **Judge** (tech lead, makes the ruling).
 - **Grounder** — Clusters analysis results across windows, merges adjacent occurrences of the same glitch, and performs bidirectional temporal boundary refinement.
 - **Summarizer** — Converts grounded glitch records into the final report, translating frame indices to timestamps and using an LLM to produce clean, coherent descriptions.
