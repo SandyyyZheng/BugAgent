@@ -18,49 +18,6 @@ BugAgent processes a video through five sequential stages:
 
 ---
 
-## Project Structure
-
-```
-BugAgent/
-├── run.py                    # CLI entry point
-├── graph.py                  # LangGraph workflow
-├── state.py                  # BugAgentState TypedDict
-├── config.py                 # configuration
-├── requirements.txt
-│
-├── llm/
-│   └── client.py             # Unified LLM client (OpenAI / Anthropic / vLLM)
-│
-├── preprocess/
-│   └── video_preprocessor.py # Frame extraction + window stitching
-│
-├── scanner/                  # ── Stage 2 ──
-│   ├── scanner.py            # GlitchScanner
-│   └── system_prompt.txt
-│
-├── analyzer/                 # ── Stage 3 ──
-│   ├── agent.py              # GlitchAnalyzer orchestration loop
-│   ├── planner.py            # Planner subagent
-│   ├── reflector.py          # Advocate / Skeptic / Judge subagents
-│   ├── memory.py             # Per-window investigation memory
-│   ├── tools.py              # VQA, ZoomIn, ObjectTracking
-│   ├── prompt_planner.txt
-│   ├── prompt_advocate.txt
-│   ├── prompt_skeptic.txt
-│   └── prompt_judge.txt
-│
-├── grounder/                 # ── Stage 4 ──
-│   ├── grounder.py           # TemporalGrounder
-│   ├── system_prompt.txt
-│   ├── prompt_similarity.txt
-│   ├── prompt_visual.txt
-│   └── prompt_merge.txt
-│
-└── summarizer/               # ── Stage 5 ──
-    ├── summarizer.py         # Summarizer
-    └── system_prompt.txt
-```
-
 
 ## Tools
 
