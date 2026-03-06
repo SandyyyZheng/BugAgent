@@ -6,11 +6,13 @@ A LangGraph-based multimodal LLM pipeline for automated video game glitch detect
 
 ## Architecture
 
+![Framework](figure/framework.png)
+
 BugAgent processes a video through five sequential stages:
 
 - **Preprocess** — Extracts frames at a fixed FPS and stitches them into overlapping windows for downstream processing.
 - **Scanner** — Runs a fast initial screening over every window to produce a glitch hypothesis (`has_glitch`, `category`, `confidence`) and a `game_context` description used as a RAG knowledge base by later stages.
-- **Analyzer** — For windows flagged by the Scanner, runs an iterative investigation loop: a **Planner** selects the next tool, an **Executor** runs it, and a **Reflector** evaluates the result via an adversarial debate between an **Advocate** (game test engineer, argues for glitch), a **Skeptic** (game developer, argues for normal behavior), and a **Judge** (tech lead, makes the ruling).
+- **Analyzer** — For windows flagged by the Scanner, runs an iterative investigation loop: a **Planner** selects the next tool, an **Executor** runs it, and a **Reflector** evaluates the result via an adversarial debate between an **Advocate** (game test engineer, argues for glitch), a **Skeptic** (game designer, argues for normal behavior), and a **Judge** (tech lead, makes the ruling).
 - **Grounder** — Clusters analysis results across windows, merges adjacent occurrences of the same glitch, and performs bidirectional temporal boundary refinement.
 - **Summarizer** — Converts grounded glitch records into the final report, translating frame indices to timestamps and using an LLM to produce clean, coherent descriptions.
 
@@ -21,9 +23,9 @@ BugAgent processes a video through five sequential stages:
 ```
 BugAgent/
 ├── run.py                    # CLI entry point
-├── graph.py                  # LangGraph workflow (nodes + edges)
+├── graph.py                  # LangGraph workflow
 ├── state.py                  # BugAgentState TypedDict
-├── config.py                 # Hierarchical configuration dataclasses
+├── config.py                 # configuration
 ├── requirements.txt
 │
 ├── llm/
@@ -41,7 +43,7 @@ BugAgent/
 │   ├── planner.py            # Planner subagent
 │   ├── reflector.py          # Advocate / Skeptic / Judge subagents
 │   ├── memory.py             # Per-window investigation memory
-│   ├── tools.py              # VQA, ZoomIn, ObjectTracking, MathCalculation
+│   ├── tools.py              # VQA, ZoomIn, ObjectTracking
 │   ├── prompt_planner.txt
 │   ├── prompt_advocate.txt
 │   ├── prompt_skeptic.txt
@@ -59,49 +61,16 @@ BugAgent/
     └── system_prompt.txt
 ```
 
----
-
-## game_context: RAG-like Knowledge Base
-
-The **Scanner** produces a `game_context` field in every window's output:
-
-```json
-{
-  "has_glitch": true,
-  "category": "Physics",
-  "visual_cues": "Red car floating above the road",
-  "confidence": 0.82,
-  "game_context": "Open-world racing game. Urban road environment with multiple vehicles and city buildings. Physics-based driving mechanics. Player vehicle is a red sports car."
-}
-```
-
-This string is **aggregated across all windows** and stored in the LangGraph state.
-The **Analyzer** injects it into every LLM prompt as a knowledge base section:
-
-```
-## Game Context (Knowledge Base)
-Open-world racing game. Urban road environment with ...
-
-## Initial Hypothesis (from Scanner)
-- Category: Physics
-...
-```
-
-This gives the Advocate, Skeptic, and Judge agents stable knowledge about the game's
-intended physics, art style, and mechanics — helping them distinguish genuine bugs from
-intentional design without hallucinating game details.
-
----
 
 ## Tools
 
 | Tool | Status | Description |
 |------|--------|-------------|
-| `vqa` | ✅ Active | Visual QA on the full stitched window image via MLLM |
-| `zoom_in` | ✅ Active | Crop and magnify a region of interest, then run VQA |
-| `object_tracking` | ⚡ Optional | Frame-by-frame SAM3 tracking + automatic physics analysis (requires SAM3 installation) |
+| `vqa` | Active | Visual QA on the full stitched window image via MLLM |
+| `zoom_in` | Active | Crop and magnify a region of interest, then run VQA |
+| `object_tracking` | Optional | Frame-by-frame SAM3 tracking + automatic physics analysis (requires SAM3 installation) |
 
-`object_tracking` is lazily initialized — SAM3 is only loaded on the first call, and the tool disables itself gracefully if SAM3 is not installed.
+`object_tracking` is lazily initialized. SAM3 is only loaded on the first call, and the tool disables itself gracefully if SAM3 is not installed.
 
 ---
 
@@ -126,7 +95,7 @@ python run.py --video data/videos/video_name.mp4
 
 ```bash
 python run.py \
-    --video data/videos/haj831.mp4 \
+    --video data/videos/video_name.mp4 \
     --api-key $OPENAI_API_KEY \
     --api-base https://api.openai.com/v1 \
     --model gpt-4o \
@@ -154,6 +123,22 @@ The final report is saved to `{output_dir}/results/{video_name}_report.json`:
 ```
 
 `time_nodes[i]` is a list of `[start_sec, end_sec]` intervals for bug `i`.
+
+---
+
+## LangGraph Flow
+
+BugAgent uses [LangGraph](https://github.com/langchain-ai/langgraph)'s `StateGraph` to wire the pipeline together. Each stage is a **node** that reads from and writes to a shared `BugAgentState` TypedDict. State is passed immutably between nodes — each node returns only the keys it updates.
+
+The edge from `scanner_node` is **conditional**: if no glitches were found, the graph skips directly to `summarizer_node`, avoiding unnecessary analyzer and grounder calls.
+
+```
+preprocess_node → scanner_node
+                       │
+                       ├── (has glitches) ──► analyzer_node ──► grounder_node ──► summarizer_node
+                       │
+                       └── (no glitches) ────────────────────────────────────► summarizer_node
+```
 
 ---
 
@@ -188,20 +173,4 @@ cfg.analyzer.confidence_threshold = 0.70 # stop when Judge reaches this confiden
 cfg.grounder.frames_per_window = 8  # must match preprocess.window_size
 
 cfg.summarizer.fps = 4.0   # must match preprocess.target_fps
-```
-
----
-
-## LangGraph Flow
-
-BugAgent uses [LangGraph](https://github.com/langchain-ai/langgraph)'s `StateGraph` to wire the pipeline together. Each stage is a **node** that reads from and writes to a shared `BugAgentState` TypedDict. State is passed immutably between nodes — each node returns only the keys it updates.
-
-The edge from `scanner_node` is **conditional**: if no glitches were found, the graph skips directly to `summarizer_node`, avoiding unnecessary analyzer and grounder calls.
-
-```
-preprocess_node → scanner_node
-                       │
-                       ├── (has glitches) ──► analyzer_node ──► grounder_node ──► summarizer_node
-                       │
-                       └── (no glitches) ────────────────────────────────────► summarizer_node
 ```
