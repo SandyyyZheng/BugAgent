@@ -13,6 +13,15 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+# Number of most-recent debate rounds shown in full detail to the Planner.
+# Older rounds are compressed to just the Judge's conclusion to stay within
+# token budget as the number of iterations grows.
+_PLANNER_FULL_ROUNDS = 2
+
+# Hard cap on the character length of a formatted tool result injected into
+# any prompt. VQA answers and object-tracking payloads can be very long.
+_MAX_RESULT_CHARS = 1500
+
 
 @dataclass
 class ToolCall:
@@ -28,7 +37,7 @@ class Reflection:
     observation: str
     confidence: float
     should_continue: bool
-    has_glitch: Optional[bool] = None   # Reflector's explicit glitch verdict
+    has_glitch: Optional[bool] = None
     adjustment_suggestion: Optional[str] = None
     timestamp: float = field(default_factory=time.time)
 
@@ -187,10 +196,28 @@ class Memory:
             "",
         ]
 
+    def _debate_base_context(
+        self, current_tool_result: Dict, hypothesis_title: str
+    ) -> List[str]:
+        """Shared opening block for Advocate and Skeptic contexts."""
+        lines: List[str] = []
+        lines.extend(self._game_context_section())
+
+        if self.hypothesis:
+            lines.append(f"## {hypothesis_title}")
+            lines.append(f"- Category: {self.current_category}")
+            lines.append(f"- Visual Cues: {self.hypothesis.get('visual_cues', 'None')}")
+            lines.append("")
+
+        lines.append("## Latest Evidence")
+        lines.append(self._format_result(current_tool_result))
+        lines.append("")
+
+        return lines
+
     def get_context_for_planner(self) -> str:
         lines: List[str] = []
 
-        # Game context first — acts as a knowledge base for the planner
         lines.extend(self._game_context_section())
 
         if self.hypothesis:
@@ -217,20 +244,30 @@ class Memory:
 
         if self.debate_rounds:
             lines.append("## Previous Debate Rounds")
+            cutoff = len(self.debate_rounds) - _PLANNER_FULL_ROUNDS
             for i, debate in enumerate(self.debate_rounds, 1):
                 lines.append(f"\n### Round {i}")
-                lines.append(f"Tool Result: {self._summarize_result(debate.tool_result)}")
-                lines.append(f"Advocate: {debate.advocate.argument[:100]}...")
-                lines.append(f"Skeptic: {debate.skeptic.argument[:100]}...")
-                lines.append(
-                    f"Judge Ruling: {debate.judge.ruling} "
-                    f"(confidence: {debate.judge.final_confidence})"
-                )
-                if debate.judge.category_corrected:
+                if i <= cutoff:
+                    # Older rounds: compress to just the Judge's conclusion.
                     lines.append(
-                        f"Category Corrected: {debate.judge.category} "
-                        f"({debate.judge.correction_reason})"
+                        f"Judge Ruling: {debate.judge.ruling} "
+                        f"(confidence: {debate.judge.final_confidence}) — "
+                        f"{debate.judge.reasoning[:100]}"
                     )
+                else:
+                    # Recent rounds: show full detail.
+                    lines.append(f"Tool Result: {self._summarize_result(debate.tool_result)}")
+                    lines.append(f"Advocate: {debate.advocate.argument[:150]}...")
+                    lines.append(f"Skeptic: {debate.skeptic.argument[:150]}...")
+                    lines.append(
+                        f"Judge Ruling: {debate.judge.ruling} "
+                        f"(confidence: {debate.judge.final_confidence})"
+                    )
+                    if debate.judge.category_corrected:
+                        lines.append(
+                            f"Category Corrected: {debate.judge.category} "
+                            f"({debate.judge.correction_reason})"
+                        )
             lines.append("")
 
             last_judge = self.get_last_judge_ruling()
@@ -256,18 +293,7 @@ class Memory:
         return "\n".join(lines)
 
     def get_context_for_advocate(self, current_tool_result: Dict) -> str:
-        lines: List[str] = []
-        lines.extend(self._game_context_section())
-
-        if self.hypothesis:
-            lines.append("## Hypothesis to SUPPORT")
-            lines.append(f"- Category: {self.current_category}")
-            lines.append(f"- Visual Cues: {self.hypothesis.get('visual_cues', 'None')}")
-            lines.append("")
-
-        lines.append("## Latest Evidence")
-        lines.append(self._format_result(current_tool_result))
-        lines.append("")
+        lines = self._debate_base_context(current_tool_result, "Hypothesis to SUPPORT")
 
         if self.debate_rounds:
             lines.append("## Your Previous Arguments")
@@ -278,18 +304,7 @@ class Memory:
         return "\n".join(lines)
 
     def get_context_for_skeptic(self, current_tool_result: Dict) -> str:
-        lines: List[str] = []
-        lines.extend(self._game_context_section())
-
-        if self.hypothesis:
-            lines.append("## Hypothesis to REFUTE")
-            lines.append(f"- Category: {self.current_category}")
-            lines.append(f"- Visual Cues: {self.hypothesis.get('visual_cues', 'None')}")
-            lines.append("")
-
-        lines.append("## Latest Evidence")
-        lines.append(self._format_result(current_tool_result))
-        lines.append("")
+        lines = self._debate_base_context(current_tool_result, "Hypothesis to REFUTE")
 
         if self.debate_rounds:
             lines.append("## Your Previous Arguments")
@@ -452,4 +467,10 @@ class Memory:
         return ", ".join(parts) if parts else str(result)[:200]
 
     def _format_result(self, result: Dict) -> str:
-        return json.dumps(result, indent=2, default=str)
+        """Serialize result to JSON, capped at _MAX_RESULT_CHARS characters."""
+        text = json.dumps(result, indent=2, default=str)
+        if len(text) > _MAX_RESULT_CHARS:
+            text = text[:_MAX_RESULT_CHARS] + (
+                f"\n... [truncated — {len(text) - _MAX_RESULT_CHARS} chars omitted]"
+            )
+        return text
