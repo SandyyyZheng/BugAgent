@@ -6,7 +6,7 @@ A LangGraph-based multimodal LLM pipeline for automated video game glitch detect
 
 ## Architecture
 
-![Framework](figure/framework.png)
+![Framework](figure/framework.jpg)
 
 BugAgent processes a video through five sequential stages:
 
