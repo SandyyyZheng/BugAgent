@@ -283,7 +283,7 @@ output/
 
 # Local model weights
 models/
-*.jpg
+data/
 *.mp4
 *.json
 
