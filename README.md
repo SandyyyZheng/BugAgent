@@ -59,11 +59,26 @@ python run.py \
     --game-name "GTA V"
 ```
 
+### 4. Batch processing
+
+Process all videos in a folder. Per-video reports and logs are written as usual; a consolidated `batch_report.json` is also saved.
+
+```bash
+python run.py \
+    --video-dir data/videos/ \
+    --game-name "GTA V" \
+    --api-key $OPENAI_API_KEY \
+    --api-base https://api.openai.com/v1 \
+    --model gpt-4o
+```
+
 ---
 
 ## Output
 
-The final report is saved to `{output_dir}/results/{video_name}_report.json`:
+### Single video
+
+The report is saved to `{output_dir}/results/{video_name}_report.json`:
 
 ```json
 {
@@ -80,6 +95,29 @@ The final report is saved to `{output_dir}/results/{video_name}_report.json`:
 ```
 
 `time_nodes[i]` is a list of `[start_sec, end_sec]` intervals for bug `i`.
+
+### Batch
+
+A consolidated report is saved to `{output_dir}/results/batch_report.json` as a JSON array of per-video reports:
+
+```json
+[
+  {
+    "video_name": "clip_01",
+    "game_name": "GTA V",
+    "no_bugs": false,
+    "bugs": ["..."],
+    "time_nodes": [[[12, 15]]]
+  },
+  {
+    "video_name": "clip_02",
+    "game_name": "GTA V",
+    "no_bugs": true,
+    "bugs": [],
+    "time_nodes": []
+  }
+]
+```
 
 ---
 
@@ -131,3 +169,34 @@ cfg.grounder.frames_per_window = 8  # must match preprocess.window_size
 
 cfg.summarizer.fps = 4.0   # must match preprocess.target_fps
 ```
+
+---
+
+## Evaluation
+
+Evaluation compares a `batch_report.json` against a ground truth file using LLM-based description scoring (0–5) and temporal IoU, then reports precision, recall, and F1 in both raw and IoU-weighted forms.
+
+### 1. Start a scoring LLM
+
+Any OpenAI-compatible server works. With a local vLLM:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 vllm serve meta-llama/Llama-3.1-8B-Instruct --port 8001 --max-model-len 8192
+```
+
+### 2. Run evaluation
+
+```bash
+python evaluation/run.py --predictions data/results/batch_report.json --groundtruth groundtruth.json --api-base http://localhost:8001/v1 --model meta-llama/Llama-3.1-8B-Instruct --output data/results/eval.json
+```
+
+`--output` is optional; if provided, per-video scores and match details are saved to the specified JSON file.
+
+### Metrics
+
+| Metric | Description |
+|--------|-------------|
+| `mean_score` | Average LLM description quality score (0–5) over matched pairs |
+| `mean_iou` | Average temporal IoU over matched pairs |
+| `precision / recall / f1` | Score-weighted detection metrics (max score = 5) |
+| `precision_iou / recall_iou / f1_iou` | Same metrics further weighted by temporal IoU |

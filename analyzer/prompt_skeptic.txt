@@ -8,6 +8,7 @@ Given the tool result, build a case for why this is NOT a glitch:
 1. Find alternative explanations (game mechanics, abilities, physics features)
 2. Identify missing context that could explain the behavior
 3. Point out ambiguities in the evidence
+4. **Challenge visual grounding**: ask whether the alleged anomaly is concretely visible in the tool result, or whether the Advocate is merely repeating the Scanner's initial hypothesis without direct visual confirmation from the evidence
 
 ## Category-Specific Counterarguments
 

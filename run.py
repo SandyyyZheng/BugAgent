@@ -3,23 +3,24 @@
 BugAgent entry point.
 
 Usage:
+    # Single video
     python run.py --video path/to/video.mp4 [options]
+
+    # Batch: all videos in a folder
+    python run.py --video-dir path/to/folder/ [options]
 
 Examples:
     # Local vLLM server (default)
-    python run.py --video data/videos/haj831.mp4
+    python run.py --video data/videos/video_name.mp4
 
     # OpenAI API
-    python run.py --video data/videos/haj831.mp4 \
+    python run.py --video data/videos/video_name.mp4 \
         --api-key $OPENAI_API_KEY \
         --api-base https://api.openai.com/v1 \
         --model gpt-4o
 
-    # Custom output directory
-    python run.py --video data/videos/haj831.mp4 --output-dir /tmp/bugagent_out
-
-    # Adjust analysis sensitivity
-    python run.py --video data/videos/haj831.mp4 --max-iterations 3 --confidence 0.8
+    # Batch processing
+    python run.py --video-dir data/videos/ --game-name "GTA V"
 """
 
 import argparse
@@ -32,10 +33,12 @@ from pathlib import Path
 # Ensure project root is on sys.path when running directly
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config import BugAgentConfig, LLMConfig, AnalyzerConfig
+from config import BugAgentConfig
 from graph import run_pipeline
 
 _defaults = BugAgentConfig()
+
+_VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,8 +47,10 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    # Input
-    parser.add_argument("--video", required=True, help="Path to input video file")
+    # Input (mutually exclusive, one required)
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--video", help="Path to a single input video file")
+    input_group.add_argument("--video-dir", help="Path to a folder — process all videos inside")
     parser.add_argument("--game-name", default="Unknown", help="Game title for the report")
 
     # LLM
@@ -73,6 +78,23 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _build_config(args: argparse.Namespace) -> BugAgentConfig:
+    cfg = BugAgentConfig()
+    cfg.llm.api_key = args.api_key
+    cfg.llm.api_base = args.api_base
+    cfg.llm.model = args.model
+    cfg.preprocess.target_fps = args.fps
+    cfg.preprocess.window_size = args.window_size
+    cfg.analyzer.max_iterations = args.max_iterations
+    cfg.analyzer.confidence_threshold = args.confidence
+    cfg.analyzer.sam3_gpus = args.sam3_gpus
+    cfg.summarizer.fps = args.fps
+    cfg.output_dir = args.output_dir
+    cfg.save_intermediate = not args.no_intermediate
+    cfg.verbose = not args.quiet
+    return cfg
+
+
 def _wait_for_vllm(api_base: str, timeout: int = 300, poll: int = 5) -> None:
     """
     Block until the vLLM server is responsive.
@@ -81,7 +103,7 @@ def _wait_for_vllm(api_base: str, timeout: int = 300, poll: int = 5) -> None:
     Exits immediately if api_base points to a non-local server.
     """
     if "localhost" not in api_base and "127.0.0.1" not in api_base:
-        return  # Remote APIs (OpenAI etc.) are assumed to be up
+        return
 
     health_url = f"{api_base.rstrip('/')}/models"
     deadline = time.time() + timeout
@@ -101,52 +123,7 @@ def _wait_for_vllm(api_base: str, timeout: int = 300, poll: int = 5) -> None:
     print(f"\nWarning: vLLM not ready after {timeout}s — proceeding anyway")
 
 
-def main():
-    args = parse_args()
-
-    video_path = Path(args.video)
-    if not video_path.exists():
-        print(f"Error: Video not found: {video_path}", file=sys.stderr)
-        sys.exit(1)
-
-    # Build config
-    cfg = BugAgentConfig()
-    cfg.llm.api_key = args.api_key
-    cfg.llm.api_base = args.api_base
-    cfg.llm.model = args.model
-    cfg.preprocess.target_fps = args.fps
-    cfg.preprocess.window_size = args.window_size
-    cfg.analyzer.max_iterations = args.max_iterations
-    cfg.analyzer.confidence_threshold = args.confidence
-    cfg.analyzer.sam3_gpus = args.sam3_gpus
-    cfg.summarizer.fps = args.fps
-    cfg.output_dir = args.output_dir
-    cfg.save_intermediate = not args.no_intermediate
-    cfg.verbose = not args.quiet
-
-    print(f"\nBugAgent")
-    print(f"{'=' * 60}")
-    print(f"Video:   {video_path}")
-    print(f"Game:    {args.game_name}")
-    print(f"Model:   {args.model}")
-    print(f"API:     {args.api_base}")
-    print(f"Output:  {args.output_dir}")
-    print(f"Logs:    {args.output_dir}/logs/")
-    print(f"SAM3:    GPU(s) {args.sam3_gpus}")
-    print(f"{'=' * 60}\n")
-
-    _wait_for_vllm(args.api_base)
-
-    final_state = run_pipeline(
-        video_path=str(video_path),
-        config_dict=cfg.to_dict(),
-        game_name=args.game_name,
-        log_dir=f"{args.output_dir}/logs",
-    )
-
-    report = final_state.get("final_report", {})
-    print(f"\n{'=' * 60}")
-    print("Done!")
+def _print_report(report: dict) -> None:
     print(f"Bugs found: {len(report.get('bugs', []))}")
     if report.get("bugs"):
         for i, bug in enumerate(report["bugs"], 1):
@@ -155,9 +132,110 @@ def main():
             print(f"  Time: {time_nodes}")
     else:
         print("  No bugs detected.")
+
+
+def run_single(video_path: Path, cfg: BugAgentConfig, game_name: str) -> dict:
+    """Run pipeline on one video. Returns the final_report dict."""
+    final_state = run_pipeline(
+        video_path=str(video_path),
+        config_dict=cfg.to_dict(),
+        game_name=game_name,
+        log_dir=f"{cfg.output_dir}/logs",
+    )
+    return final_state.get("final_report", {})
+
+
+def run_batch(video_dir: Path, cfg: BugAgentConfig, game_name: str) -> None:
+    """
+    Process every video in video_dir and write a consolidated batch report.
+
+    Per-video JSON reports and logs are written as usual.
+    A merged batch_report.json is saved to {output_dir}/results/.
+    """
+    videos = sorted(
+        p for p in video_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in _VIDEO_EXTENSIONS
+    )
+
+    if not videos:
+        print(f"No video files found in {video_dir}")
+        sys.exit(1)
+
+    print(f"\nBugAgent — Batch Mode")
+    print(f"{'=' * 60}")
+    print(f"Folder:  {video_dir}")
+    print(f"Videos:  {len(videos)}")
+    print(f"Game:    {game_name}")
+    print(f"Model:   {cfg.llm.model}")
+    print(f"API:     {cfg.llm.api_base}")
+    print(f"Output:  {cfg.output_dir}")
     print(f"{'=' * 60}\n")
 
-    return final_state
+    all_reports = []
+    failed = []
+
+    for idx, video_path in enumerate(videos, 1):
+        print(f"\n[{idx}/{len(videos)}] {video_path.name}")
+        print(f"{'-' * 40}")
+        try:
+            report = run_single(video_path, cfg, game_name)
+            all_reports.append(report)
+            _print_report(report)
+        except Exception as e:
+            print(f"  ERROR: {e}")
+            failed.append({"video": video_path.name, "error": str(e)})
+
+    # Write consolidated batch report
+    batch_output = Path(cfg.output_dir) / "results" / "batch_report.json"
+    batch_output.parent.mkdir(parents=True, exist_ok=True)
+    with open(batch_output, "w") as f:
+        json.dump(all_reports, f, indent=2)
+
+    print(f"\n{'=' * 60}")
+    print(f"Batch complete: {len(all_reports)} succeeded, {len(failed)} failed")
+    if failed:
+        print("Failed videos:")
+        for entry in failed:
+            print(f"  {entry['video']}: {entry['error']}")
+    print(f"Batch report → {batch_output}")
+    print(f"{'=' * 60}\n")
+
+
+def main():
+    args = parse_args()
+    cfg = _build_config(args)
+
+    _wait_for_vllm(args.api_base)
+
+    if args.video_dir:
+        video_dir = Path(args.video_dir)
+        if not video_dir.is_dir():
+            print(f"Error: Not a directory: {video_dir}", file=sys.stderr)
+            sys.exit(1)
+        run_batch(video_dir, cfg, args.game_name)
+    else:
+        video_path = Path(args.video)
+        if not video_path.exists():
+            print(f"Error: Video not found: {video_path}", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"\nBugAgent")
+        print(f"{'=' * 60}")
+        print(f"Video:   {video_path}")
+        print(f"Game:    {args.game_name}")
+        print(f"Model:   {args.model}")
+        print(f"API:     {args.api_base}")
+        print(f"Output:  {args.output_dir}")
+        print(f"Logs:    {args.output_dir}/logs/")
+        print(f"SAM3:    GPU(s) {args.sam3_gpus}")
+        print(f"{'=' * 60}\n")
+
+        report = run_single(video_path, cfg, args.game_name)
+
+        print(f"\n{'=' * 60}")
+        print("Done!")
+        _print_report(report)
+        print(f"{'=' * 60}\n")
 
 
 if __name__ == "__main__":

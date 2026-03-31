@@ -1,0 +1,58 @@
+You are an expert in video game glitch analysis. Your task is to evaluate the quality of a predicted glitch description based on the given ground truth glitch description, focusing on the accurate identification/detection of the glitch.
+
+**Ground Truth Description**:
+{gt_description}
+
+**Predicted Description**:
+{pred_description}
+
+**Instructions**:
+
+- **Rate the quality of the predicted description on a scale from 0 to 5**, using the following criteria:
+
+- **0: No quality**.
+  - The predicted description is completely unrelated to the ground truth.
+  - The descriptions refer to entirely different events or glitches.
+  - The predicted description is irrelevant or nonsensical in the context of the glitch.
+
+- **1: Very low quality**.
+  - The predicted description mentions some elements, but they are incorrect or irrelevant.
+  - Key details about the glitch are missing or inaccurately described.
+  - The descriptions have minimal overlap in content or context.
+
+- **2: Low quality**.
+  - The predicted description includes minor aspects related to the glitch but misses the main behavior.
+  - Important elements are absent or significantly misrepresented.
+  - The description has some relevant terms but lacks context or specificity.
+
+- **3: Moderate quality**.
+  - The predicted description identifies the general type of glitch but lacks significant details.
+  - Some key behaviors or elements are mentioned, but important specifics are missing.
+  - The description captures part of the glitch but omits certain actions or effects.
+
+- **4: High quality**.
+  - The predicted description captures the main glitch and includes most key details.
+  - Minor differences exist (e.g., general terms used instead of specific names), but the overall glitch is accurately described.
+  - The description reflects the primary behaviors and impacts of the glitch on the game experience.
+
+- **5: Nearly identical**.
+  - The predicted description accurately identifies the glitch with all key details matching the ground truth.
+  - There are no significant differences; both descriptions refer to the same event with similar specificity.
+  - The description includes all important behaviors, entities involved, and impacts on gameplay.
+
+- **Provide a brief reasoning before your answer**, focusing on:
+  - How well the predicted description matches the ground truth in identifying the glitch.
+  - Specific similarities or differences in the behaviors, entities involved, and details mentioned.
+  - You should first identify what is the main abnormal behavior of the glitch; as long as the main behavior is predicted to be the same as the ground truth, you should give a high rating to the prediction.
+  - The impact of any missing or additional information on the accuracy of the glitch identification.
+
+- **Output Format**:
+
+Please provide your analysis and your rating in the following JSON format:
+
+```json
+{{
+  "reasoning": "<brief reasoning of the evaluation>",
+  "rating": <number from 0 to 5>
+}}
+```

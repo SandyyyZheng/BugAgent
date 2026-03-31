@@ -476,9 +476,9 @@ class ObjectTrackingTool(Tool):
                     "object_description": object_description,
                 }
 
-            # Propagate across all frames
-            _log.debug("SAM3 propagate_in_video ...")
-            all_outputs = self._tracker.propagate_in_video()
+            # Propagate — limited to the window's frame range if provided
+            _log.debug(f"SAM3 propagate_in_video (frame_range={frame_range}) ...")
+            all_outputs = self._tracker.propagate_in_video(frame_range=frame_range)
 
             # Build boxes / centroids, filtering to frame_range if given
             boxes: Dict[int, List[float]] = {}

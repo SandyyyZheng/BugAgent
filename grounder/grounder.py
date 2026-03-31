@@ -120,7 +120,6 @@ class TemporalGrounder:
         self.base_prompt = (_dir / "system_prompt.txt").read_text()
         self.prompt_similarity = Template((_dir / "prompt_similarity.txt").read_text())
         self.prompt_visual = Template((_dir / "prompt_visual.txt").read_text())
-        self.prompt_merge = Template((_dir / "prompt_merge.txt").read_text())
 
     def ground(
         self,
@@ -420,11 +419,9 @@ class TemporalGrounder:
         category = cluster.get("category", "Unknown")
         subtype = cluster.get("subtype", "Unknown")
 
-        # Merge descriptions
-        if len(cluster["description"]) == 1:
-            merged_description = cluster["description"][0]
-        else:
-            merged_description = self._merge_descriptions(cluster["description"])
+        # Use the first description as a placeholder; the Summarizer
+        # will do the final LLM merge with richer context.
+        merged_description = cluster["description"][0]
 
         # Calculate occurrences (merge consecutive windows into intervals)
         occurrences = self._merge_windows_to_occurrences(final_windows, window_timings)
@@ -501,18 +498,6 @@ class TemporalGrounder:
         })
 
         return occurrences
-
-    def _merge_descriptions(self, descriptions: List[str]) -> str:
-        """
-        Merge multiple descriptions into one coherent description.
-        """
-        prompt = self.prompt_merge.substitute(descriptions=json.dumps(descriptions, indent=2))
-        try:
-            merged = self._call_llm(prompt)
-            return merged.strip()
-        except Exception as e:
-            _log.warning(f"Description merge failed: {e}")
-            return " | ".join(descriptions)
 
     def _call_llm(self, user_message: str) -> str:
         """Call LLM API (text only)."""
