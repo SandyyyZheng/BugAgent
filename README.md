@@ -1,4 +1,4 @@
-# BugAgent - Glitch Detection in Gameplay Videos
+# GliDe - Glitch Detection in Gameplay Videos
 
 A LangGraph-based multimodal LLM pipeline for automated video game glitch detection.
 
@@ -8,7 +8,7 @@ A LangGraph-based multimodal LLM pipeline for automated video game glitch detect
 
 ![Framework](figure/framework.jpg)
 
-BugAgent processes a video through five sequential stages:
+GliDe processes a video through five sequential stages:
 
 - **Preprocess** — Extracts frames at a fixed FPS (default 4 fps) and stitches them into windows (default 8 frames per window) for downstream processing.
 - **Scanner** — Runs a fast initial screening over every window to produce a glitch hypothesis (`has_glitch`, `category`, `confidence`) and a `game_context` description used as a RAG-like knowledge base by later stages.
@@ -123,7 +123,7 @@ A consolidated report is saved to `{output_dir}/results/batch_report.json` as a 
 
 ## LangGraph Flow
 
-BugAgent uses [LangGraph](https://github.com/langchain-ai/langgraph)'s `StateGraph` to wire the pipeline together. Each stage is a **node** that reads from and writes to a shared `BugAgentState` TypedDict. State is passed immutably between nodes — each node returns only the keys it updates.
+GliDe uses [LangGraph](https://github.com/langchain-ai/langgraph)'s `StateGraph` to wire the pipeline together. Each stage is a **node** that reads from and writes to a shared `BugAgentState` TypedDict. State is passed immutably between nodes — each node returns only the keys it updates.
 
 The edge from `scanner_node` is **conditional**: if no glitches were found, the graph skips directly to `summarizer_node`, avoiding unnecessary analyzer and grounder calls.
 
